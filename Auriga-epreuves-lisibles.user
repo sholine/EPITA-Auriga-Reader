@@ -1,0 +1,160 @@
+// ==UserScript==
+// @name         Auriga EPITA – noms d'épreuves lisibles
+// @namespace    https://auriga.epita.fr/
+// @version      1.0
+// @description  Remplace les codes d'épreuve (ex. 2627_I_INF_FISE_S01_CN_PC_DP_EXA_1) par un libellé lisible, et arrondit les notes.
+// @match        https://auriga.epita.fr/*
+// @match        https://*.auriga.epita.fr/*
+// @author       Nicolas
+// @license      MIT
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // =====================================================================
+  // 1) DICTIONNAIRE À COMPLÉTER
+  //    Clé = code tel qu'il apparaît entre les "_" ; valeur = libellé.
+  //    Les valeurs suivies de (?) sont des suppositions : corrigez-les
+  //    (votre fils ou la page « Ses notes (synthèse) » vous donneront
+  //    les vrais intitulés). Laissez "" pour masquer un code.
+  // =====================================================================
+  const MATIERES = {
+    // UE (unités d'enseignement)
+    AG:   'Agir',
+    CN:   'Concevoir',
+    PI:   'Piloter',
+    PR:   'Produire',
+
+    // Parcours PC / PA → masqués (n'apportent rien à la lecture)
+    PC:   '',
+    PA:   '',
+
+    // UE Agir
+    ACF:  'Anglais communication formelle',
+    DDRS: 'Développement durable (DDRS)',
+    NTS:  'IA générative / Nouvelles technologies',
+
+    // UE Concevoir
+    TAA:  'Types algébriques abstraits',
+    OAC:  'Électronique – Outils d\'analyse de circuits',
+    MECA: 'Physique – Mécanique du point',
+    SEM:  'Maths – Séminaire',
+    OBM:  'Maths – Outils de base mathématiques',
+    DP:   'Maths – Dénombrement et probabilités',
+    APIS: 'Maths – Primitives, intégrales et suites',
+
+    // UE Piloter
+    ADP:   'Anglais documents et presse',
+    MDT:   'Méthodologie de travail',
+    GDG:   'Méthodologie – Gestion du groupe',
+    ATEXE: 'Expression écrite',
+    ATEXO: 'Expression orale',
+
+    // UE Produire
+    CAML: 'Caml et récursivité',
+    LIMA: 'Listes et matrices',
+    PET:  'Python et environnement de travail',
+    NUM:  'Archi – Numération',
+
+    // SAÉ
+    CDSF: 'Cahier des spécifications fonctionnelles',
+  };
+
+  // Types d'épreuve (colonne « Type d'examen »)
+  const TYPES = {
+    EXA: 'Examen',
+    EXO: 'Moyenne des TP',
+    DMA: 'Devoir maison',
+    EXF: 'Examen final',
+    FAF: 'TP en conditions d\'examen',
+  };
+
+  // Exceptions : même code de type, sens différent selon la matière
+  const TYPES_PAR_MATIERE = {
+    ACF: { EXO: 'Expression écrite en classe' },
+  };
+
+  // Arrondir les notes du type 15.3333333333 → 15,33
+  const ARRONDIR_NOTES = true;
+
+  // Afficher les coefficients en pourcentage (90,00 → 90%)
+  const COEF_EN_POURCENT = true;
+
+  // =====================================================================
+  // 2) DÉCODAGE (pas besoin de toucher en dessous)
+  //    Structure : AAAA_Niveau_Filière_Statut_Sxx_[codes matière…]_TYPE[_n°]
+  // =====================================================================
+  const CODE_RE = /^\d{4}_[A-Z]+_[A-Z]+_[A-Z]+_S\d{2}_[A-Z0-9_]+$/;
+
+  function decoder(code) {
+    const p = code.split('_');
+    const semestre = 'S' + parseInt(p[4].slice(1), 10);
+    let reste = p.slice(5);
+
+    let numero = '';
+    if (/^\d+$/.test(reste[reste.length - 1])) numero = reste.pop();
+
+    let type = '';
+    const codeType = reste[reste.length - 1];
+    const codeMatiere = reste[reste.length - 2];
+    const exceptions = TYPES_PAR_MATIERE[codeMatiere] || {};
+    if (exceptions[codeType] !== undefined) { type = exceptions[codeType]; reste.pop(); }
+    else if (TYPES[codeType] !== undefined) { type = TYPES[codeType]; reste.pop(); }
+
+    const matiere = reste
+      .map(c => (MATIERES[c] !== undefined ? MATIERES[c] : c))
+      .filter(Boolean)
+      .join(' – ');
+
+    let libelle = `${semestre} · ${matiere || '?'}`;
+    if (type) libelle += ` · ${type}${numero ? ' n°' + numero : ''}`;
+    else if (numero) libelle += ` n°${numero}`;
+    return libelle;
+  }
+
+  const dejaTraites = new WeakSet(); // évite de retraiter nos propres modifications
+
+  function traiter(racine) {
+    const walker = document.createTreeWalker(racine, NodeFilter.SHOW_TEXT);
+    const noeuds = [];
+    while (walker.nextNode()) noeuds.push(walker.currentNode);
+
+    for (const n of noeuds) {
+      const txt = n.nodeValue.trim();
+      if (!txt || dejaTraites.has(n)) continue;
+
+      if (CODE_RE.test(txt)) {
+        n.nodeValue = decoder(txt);
+        if (n.parentElement) n.parentElement.title = txt; // code d'origine au survol
+      } else if (ARRONDIR_NOTES && /^\d+\.\d{3,}$/.test(txt)) {
+        const val = parseFloat(txt);
+        n.nodeValue = val.toFixed(2).replace('.', ',');
+        dejaTraites.add(n);
+        if (n.parentElement) n.parentElement.title = txt;
+      } else if (COEF_EN_POURCENT && /^\d+,\d{2}$/.test(txt)) {
+        // Les coefs sont affichés avec une virgule (30,00), les notes avec un point
+        n.nodeValue = txt.replace(/,00$/, '').replace(/(,\d)0$/, '$1') + '%';
+        dejaTraites.add(n);
+      }
+    }
+  }
+
+  // Auriga recharge le tableau dynamiquement : on surveille la page
+  let enAttente = false;
+  const observer = new MutationObserver(() => {
+    if (enAttente) return;
+    enAttente = true;
+    requestAnimationFrame(() => {
+      observer.disconnect();
+      traiter(document.body);
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      enAttente = false;
+    });
+  });
+
+  traiter(document.body);
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+})();
